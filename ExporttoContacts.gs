@@ -1,18 +1,15 @@
 /*
 Project Name: Contact Import
-Project Version: 7.01
+Project Version: 8.07
 Filename: ExporttoContacts.gs
-File Version: 3.01
+File Version: 3.15
 Chat link: [Insert Link]
 */
 
 /**
  * Syncs the structured data from the Setup Sheet back to Google Contacts.
- * - Uses BATCH OPERATIONS to prevent Quota limits and Timeouts.
- * - Updates existing contacts in chunks of 50.
- * - Manages Labels (Creates new ones if missing).
- * - Deletes contacts if the "Delete from contacts" label is applied.
- * - NOTE: Contact Creation is currently DISABLED.
+ * - Uses BATCH OPERATIONS.
+ * - Reports specific REASONS for updates to help debug phantom changes.
  */
 function syncSheetsToContacts() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -27,7 +24,6 @@ function syncSheetsToContacts() {
   const data = dataRange.getValues();
   const headers = data[0];
   
-  // 1. Map Headers to Column Indices
   const colMap = mapHeaders(headers);
   const missingCols = [];
   if (colMap.id === -1) missingCols.push("Resource ID");
@@ -37,24 +33,19 @@ function syncSheetsToContacts() {
     return;
   }
 
-  // 2. Fetch Existing Contact Groups (Labels) to memory
   let groupMap = fetchAllContactGroups();
 
-  // 3. Stats & Queues
-  let stats = { updated: 0, created: 0, deleted: 0, labelsCreated: 0, errors: [], skipped: 0 };
-  let updateQueue = []; // Array of row objects to process in batch
-  const BATCH_SIZE = 50; // API limit is often 50 or 100
+  // Stats include 'changes' array to log specific reasons
+  let stats = { updated: 0, created: 0, deleted: 0, labelsCreated: 0, errors: [], skipped: 0, unchanged: 0, changes: [] };
+  let updateQueue = []; 
+  const BATCH_SIZE = 50; 
 
-  // 4. Iterate Rows (Skip Header)
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    
-    // Aggressive sanitization of Resource ID
     let sheetResourceName = row[colMap.id] ? String(row[colMap.id]).trim().replace(/[\s\u200B-\u200D\uFEFF]/g, '') : "";
     const labelString = row[colMap.labels] ? String(row[colMap.labels]) : "";
     
-    // --- A. HANDLE DELETE (Single Operation) ---
-    // Deletes are rarer, so we process them individually to keep logic simple
+    // --- DELETE ---
     if (labelString.includes("Delete from contacts")) {
       if (sheetResourceName) {
         try {
@@ -70,8 +61,7 @@ function syncSheetsToContacts() {
       continue; 
     }
 
-    // --- B. PREPARE LABELS ---
-    // We do this per row to create missing labels on the fly if needed
+    // --- PREPARE LABELS ---
     const labels = labelString.split(',').map(s => s.trim()).filter(s => s);
     const groupResourceNames = [];
     
@@ -87,114 +77,108 @@ function syncSheetsToContacts() {
       if (groupMap[label]) groupResourceNames.push(groupMap[label]);
     });
 
-    // --- C. QUEUE UPDATE ---
+    // --- QUEUE ---
     if (sheetResourceName) {
       if (sheetResourceName.startsWith("people/")) {
-        // Add to batch queue
         updateQueue.push({
           row: row,
-          rowIndex: i + 1, // 1-based index for logging
+          rowIndex: i + 1, 
           resourceName: sheetResourceName,
           groupResourceNames: groupResourceNames
         });
       } else {
-        stats.errors.push(`Row ${i+1}: Invalid ID format. Skipping.`);
+        stats.errors.push(`Row ${i+1}: Invalid ID. Skipping.`);
       }
     } else {
-      // Creation DISABLED
-      continue;
+      continue; // Creation Disabled
     }
 
-    // --- D. PROCESS BATCH IF FULL ---
     if (updateQueue.length >= BATCH_SIZE) {
-      processUpdateBatch(updateQueue, colMap, stats);
-      updateQueue = []; // Reset queue
-      Utilities.sleep(1000); // Brief pause between batches
+      processUpdateBatch(updateQueue, colMap, stats, groupMap);
+      updateQueue = []; 
+      Utilities.sleep(1000); 
     }
   }
 
-  // --- E. PROCESS REMAINING ITEMS ---
   if (updateQueue.length > 0) {
-    processUpdateBatch(updateQueue, colMap, stats);
+    processUpdateBatch(updateQueue, colMap, stats, groupMap);
   }
 
   // --- REPORT ---
   let msg = `Sync Complete.
 Updated: ${stats.updated}
+Unchanged: ${stats.unchanged}
 Deleted: ${stats.deleted}
-Skipped (Read-Only/Domain): ${stats.skipped}
-New Labels: ${stats.labelsCreated}
-(Creation Disabled)`;
+New Labels: ${stats.labelsCreated}`;
+
+  if (stats.changes.length > 0) {
+    msg += `\n\n--- Update Reasons (First 10) ---\n` + stats.changes.slice(0, 10).join("\n");
+  }
 
   if (stats.errors.length > 0) {
-    msg += `\n\nErrors (${stats.errors.length}):\n` + stats.errors.slice(0, 5).join("\n");
+    msg += `\n\n--- Errors (First 5) ---\n` + stats.errors.slice(0, 5).join("\n");
   }
   
   SpreadsheetApp.getUi().alert(msg);
 }
 
-/**
- * Processes a batch of up to 50 updates.
- * 1. Fetches ETags for all IDs in the batch (1 API Call).
- * 2. Matches Sheet Data to API Data.
- * 3. Sends Updates (1 API Call).
- */
-function processUpdateBatch(queue, colMap, stats) {
+function processUpdateBatch(queue, colMap, stats, groupMap) {
   if (queue.length === 0) return;
 
   const resourceNames = queue.map(item => item.resourceName);
-  const resourceToSheetMap = {}; // Map ID -> Queue Item
+  const resourceToSheetMap = {}; 
   queue.forEach(item => { resourceToSheetMap[item.resourceName] = item; });
+  const knownGroupIds = new Set(Object.values(groupMap));
 
   try {
-    // 1. BATCH GET: Fetch metadata for all IDs to check existence and get ETags
-    // getBatchGet returns { responses: [ { httpStatusCode, person, requestedResourceName } ] }
     const getResponse = People.People.getBatchGet({
       resourceNames: resourceNames,
-      personFields: 'metadata'
+      personFields: 'metadata,names,organizations,emailAddresses,phoneNumbers,memberships'
     });
 
     const batchUpdatePayload = {};
     const validIds = [];
 
-    // Process GET results
     if (getResponse.responses) {
       getResponse.responses.forEach(response => {
-        const id = response.requestedResourceName;
-        const sheetItem = resourceToSheetMap[id];
+        const requestedId = response.requestedResourceName;
+        const sheetItem = resourceToSheetMap[requestedId];
 
         if (response.httpStatusCode === 200 && response.person) {
           const person = response.person;
+          const canonicalId = person.resourceName;
           
-          // Check Read-Only
           const sources = person.metadata.sources || [];
           const isContact = sources.some(s => s.type === 'CONTACT');
-          
           if (!isContact) {
             stats.skipped++;
             return;
           }
 
-          // Construct Payload
-          // Note: sheetItem.row is the raw array from the sheet
           const payload = constructContactPayload(sheetItem.row, colMap, sheetItem.groupResourceNames, person.etag);
           
-          batchUpdatePayload[id] = payload;
-          validIds.push(id);
+          // CHECK DIFFERENCES
+          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex);
+          
+          if (diffReason) {
+            batchUpdatePayload[canonicalId] = payload;
+            validIds.push(canonicalId);
+            stats.changes.push(`Row ${sheetItem.rowIndex}: ${diffReason}`);
+            Logger.log(`[Diff Row ${sheetItem.rowIndex}] ${diffReason}`); // Changed to Logger.log
+          } else {
+            stats.unchanged++;
+          }
 
         } else if (response.httpStatusCode === 404) {
-          stats.errors.push(`Row ${sheetItem.rowIndex}: Contact not found (404).`);
+          stats.errors.push(`Row ${sheetItem.rowIndex}: Contact ID 404. skipped.`);
         } else {
-           stats.errors.push(`Row ${sheetItem.rowIndex}: API Error ${response.httpStatusCode}`);
+           stats.errors.push(`Row ${sheetItem.rowIndex}: GET Error ${response.httpStatusCode}`);
         }
       });
     }
 
-    // 2. BATCH UPDATE: Send all valid payloads
     if (validIds.length > 0) {
-      // Fields to update
       const fields = ['memberships', 'names', 'organizations', 'emailAddresses', 'phoneNumbers'];
-
       const batchRequest = {
         contacts: batchUpdatePayload,
         updateMask: fields.join(',')
@@ -202,11 +186,11 @@ function processUpdateBatch(queue, colMap, stats) {
 
       try {
         const updateResponse = People.People.batchUpdateContacts(batchRequest);
-        // updateResponse.updateResult is a map of ID -> PersonResponse
-        if (updateResponse.updateResult) {
-           // Count successful updates
+        if (updateResponse && updateResponse.updateResult) {
            const successes = Object.keys(updateResponse.updateResult).length;
            stats.updated += successes;
+        } else {
+           stats.updated += validIds.length;
         }
       } catch (batchErr) {
         stats.errors.push(`Batch Update Failed: ${batchErr.message.substring(0, 100)}`);
@@ -218,23 +202,128 @@ function processUpdateBatch(queue, colMap, stats) {
   }
 }
 
+/**
+ * Returns a string reason if content is different, or null if identical.
+ * Accumulates multiple differences.
+ */
+function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
+  const norm = (str) => (str || "").trim();
+  const diffs = [];
 
-// --- HELPER FUNCTIONS ---
+  // Filter helper: Only keep fields that are editable CONTACT type (ignore Domain/System fields)
+  const isEditable = (item) => {
+    if (!item.metadata || !item.metadata.source) return true; // Assume true if no metadata (rare)
+    return item.metadata.source.type === 'CONTACT';
+  };
+
+  // 1. Names
+  const pName = payload.names ? payload.names[0] : {};
+  const cName = (contact.names && contact.names.length > 0) ? contact.names[0] : {};
+  if (norm(pName.givenName) !== norm(cName.givenName)) {
+    diffs.push(`Name (Given): "${pName.givenName}" != "${cName.givenName}"`);
+  }
+  if (norm(pName.familyName) !== norm(cName.familyName)) {
+    diffs.push(`Name (Family): "${pName.familyName}" != "${cName.familyName}"`);
+  }
+
+  // 2. Organizations
+  const pOrg = payload.organizations ? payload.organizations[0] : {};
+  const cOrg = (contact.organizations && contact.organizations.length > 0) ? contact.organizations[0] : {};
+  if (norm(pOrg.name) !== norm(cOrg.name)) {
+    diffs.push(`Org Name: "${pOrg.name}" != "${cOrg.name}"`);
+  }
+  if (norm(pOrg.title) !== norm(cOrg.title)) {
+    diffs.push(`Org Title: "${pOrg.title}" != "${cOrg.title}"`);
+  }
+  if (norm(pOrg.department) !== norm(cOrg.department)) {
+    diffs.push(`Org Dept: "${pOrg.department}" != "${cOrg.department}"`);
+  }
+
+  // 3. Emails (Compare VALUES ONLY)
+  // FILTER: Only compare against Google emails that are source: CONTACT
+  const getEmailSig = (e) => norm(e.value).toLowerCase();
+  
+  const pEmails = new Set((payload.emailAddresses || []).map(getEmailSig));
+  
+  // Filter Google emails to only those we can edit (User Contacts)
+  const editableGoogleEmails = (contact.emailAddresses || []).filter(isEditable);
+  const cEmails = new Set(editableGoogleEmails.map(getEmailSig));
+  
+  if (pEmails.size !== cEmails.size) {
+    diffs.push(`Email Count: ${pEmails.size} vs ${cEmails.size} (Google Editable: ${editableGoogleEmails.length})`);
+  } else {
+    for (let e of pEmails) {
+      if (!cEmails.has(e)) {
+        diffs.push(`Email mismatch: "${e}" not found in Google`);
+      }
+    }
+  }
+
+  // 4. Phones (Compare Digits ONLY)
+  const cleanPhone = (p) => {
+    let s = norm(p.value).replace(/\D/g, "");
+    if (s.length === 11 && s.startsWith("1")) s = s.substring(1); 
+    return s;
+  };
+  
+  const pPhones = new Set((payload.phoneNumbers || []).map(cleanPhone));
+  
+  // Filter Google phones to only those we can edit
+  const editableGooglePhones = (contact.phoneNumbers || []).filter(isEditable);
+  const cPhones = new Set(editableGooglePhones.map(cleanPhone));
+  
+  if (pPhones.size !== cPhones.size) {
+    diffs.push(`Phone Count: ${pPhones.size} vs ${cPhones.size}`);
+  } else {
+    for (let p of pPhones) {
+      if (!cPhones.has(p)) {
+        diffs.push(`Phone mismatch: "${p}"`);
+      }
+    }
+  }
+
+  // 5. Memberships
+  // Filter API memberships to only include groups we know about (managed in the sheet)
+  const getGroups = (arr) => (arr || [])
+    .map(m => m.contactGroupMembership ? m.contactGroupMembership.contactGroupResourceName : null)
+    .filter(id => id && knownGroupIds.has(id)); 
+  
+  const pGroups = new Set(
+     (payload.memberships || []).map(m => m.contactGroupMembership.contactGroupResourceName)
+  );
+  const cGroups = new Set(getGroups(contact.memberships));
+  
+  if (pGroups.size !== cGroups.size) {
+    diffs.push(`Label Count: ${pGroups.size} vs ${cGroups.size}`);
+  } else {
+    for (let g of pGroups) {
+      if (!cGroups.has(g)) {
+        diffs.push(`Label mismatch: Sheet has ${g} which Google lacks`);
+      }
+    }
+  }
+
+  if (diffs.length > 0) {
+    return diffs.join("; ");
+  }
+
+  return null; // No difference found
+}
 
 function constructContactPayload(row, colMap, groupResourceNames, etag) {
-  const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]) : "";
+  const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]).trim() : "";
 
   const payload = {};
   if (etag) payload.etag = etag;
 
-  // 1. Names
+  // Names
   const given = getVal(colMap.firstName);
   const family = getVal(colMap.lastName);
   if (given || family) {
     payload.names = [{ givenName: given, familyName: family }];
   }
 
-  // 2. Organizations
+  // Organizations
   const orgName = getVal(colMap.orgName);
   const orgTitle = getVal(colMap.orgTitle);
   const orgDept = getVal(colMap.orgDept);
@@ -242,12 +331,12 @@ function constructContactPayload(row, colMap, groupResourceNames, etag) {
     payload.organizations = [{ name: orgName, title: orgTitle, department: orgDept }];
   }
 
-  // 3. Memberships
+  // Memberships
   payload.memberships = groupResourceNames.map(grp => ({
     contactGroupMembership: { contactGroupResourceName: grp }
   }));
 
-  // 4. Emails
+  // Emails
   const emails = [];
   colMap.emails.forEach(pair => {
     const val = getVal(pair.valIdx);
@@ -256,7 +345,7 @@ function constructContactPayload(row, colMap, groupResourceNames, etag) {
   });
   payload.emailAddresses = emails; 
 
-  // 5. Phones
+  // Phones
   const phones = [];
   colMap.phones.forEach(pair => {
     const val = getVal(pair.valIdx);
