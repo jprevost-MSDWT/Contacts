@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 6.01
+Project Version: 9.01
 Filename: Initialization.gs
-File Version: 3.01
+File Version: 4.01
 Chat link: [Insert Link]
 */
 

@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 6.02
+Project Version: 9.01
 Filename: ImportSetup.gs
-File Version: 3.03
+File Version: 4.01
 Chat link: [Insert Link]
 */
 
@@ -360,7 +360,7 @@ function SetupSheetFormatting() {
 
   // --- COLUMN A RULES (Resource ID Dashboard) ---
 
-  // A. Non-Warren Email (Text #9900ff)
+  // A. Non-Warren Email (Text #9900ff) - Check if ANY email is non-Warren
   if (emailPairs.length > 0) {
     const nonWarrenConditions = emailPairs.map(pair => {
       const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
@@ -377,7 +377,7 @@ function SetupSheetFormatting() {
     }
   }
 
-  // B. Clean Status (Text #C0C0C0)
+  // B. Clean Status (Text #C0C0C0) - Valid Warren, No Phones, No Non-Warren
   if (emailPairs.length > 0) {
     const hasWarrenConditions = emailPairs.map(pair => {
       const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
