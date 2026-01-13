@@ -27,8 +27,8 @@ const CONFIG = {
   ARCHIVE_ROW_COLOR: '#d0e0e3', // Light Cyan for "Archive"
   WARREN_DOMAIN: '@warren.k12.in.us',
   // Sorting Configuration (Comma Separated Values)
-  Labels_Values_Sort_Order: "Work Phone List, Contractors, Personal, Archive, Delete from contacts",
-  Row_Labels_Sort_Order_Top: "Work Phone List, Contractors, Personal",
+  Labels_Values_Sort_Order: "Work Phone List, Contractors, Personal, Porter, Archive, Delete from contacts",
+  Row_Labels_Sort_Order_Top: "Work Phone List, Contractors, Personal,Porter",
   Row_Labels_Sort_Order_Bottom: "Archive, Delete from contacts"
 };
 
