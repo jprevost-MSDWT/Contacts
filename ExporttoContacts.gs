@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 9.01
+Project Version: 9.07
 Filename: ExporttoContacts.gs
-File Version: 5.02
+File Version: 5.03
 Chat link: [Insert Link]
 */
 
@@ -122,15 +122,6 @@ New Labels: ${stats.labelsCreated}`;
   SpreadsheetApp.getUi().alert(msg);
 }
 
-/**
- * Processes a batch of contacts to update.
- * It fetches the full contact data from the People API, compares it with the sheet data,
- * and sends a batch update request only for contacts with detected changes.
- * @param {Array<Object>} queue The queue of items to process.
- * @param {Object} colMap A map of header names to column indices.
- * @param {Object} stats The statistics object to update.
- * @param {Object} groupMap A map of contact group names to their resource names.
- */
 function processUpdateBatch(queue, colMap, stats, groupMap) {
   if (queue.length === 0) return;
 
@@ -219,9 +210,8 @@ function processUpdateBatch(queue, colMap, stats, groupMap) {
  */
 function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const norm = (str) => (str || "").trim();
-  // Filter helper: Only keep fields that are editable CONTACT type (ignore Domain/System fields)
   const isEditable = (item) => {
-    if (!item.metadata || !item.metadata.source) return true; // Assume true if no metadata (rare)
+    if (!item.metadata || !item.metadata.source) return true; 
     return item.metadata.source.type === 'CONTACT';
   };
 
@@ -260,17 +250,11 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const editableGoogleEmails = (contact.emailAddresses || []).filter(isEditable);
   const cEmails = new Set(editableGoogleEmails.map(getEmailSig));
   
-  // Check for additions
   const emailsToAdd = [...pEmails].filter(e => !cEmails.has(e));
-  if (emailsToAdd.length > 0) {
-    diffs.push(`Email(s) to add: ${emailsToAdd.join(', ')}`);
-  }
-
-  // Check for removals
   const emailsToRemove = [...cEmails].filter(e => !pEmails.has(e));
-  if (emailsToRemove.length > 0) {
-    diffs.push(`Email(s) to remove: ${emailsToRemove.join(', ')}`);
-  }
+
+  if (emailsToAdd.length > 0) diffs.push(`Email(s) to add: ${emailsToAdd.join(', ')}`);
+  if (emailsToRemove.length > 0) diffs.push(`Email(s) to remove: ${emailsToRemove.join(', ')}`);
 
   // 4. Phones (Compare Digits ONLY)
   const cleanPhone = (p) => {
@@ -280,20 +264,14 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   };
   
   const pPhones = new Set((payload.phoneNumbers || []).map(cleanPhone));
-  
-  // Filter Google phones to only those we can edit
   const editableGooglePhones = (contact.phoneNumbers || []).filter(isEditable);
   const cPhones = new Set(editableGooglePhones.map(cleanPhone));
   
-  if (pPhones.size !== cPhones.size) {
-    diffs.push(`Phone Count: ${pPhones.size} vs ${cPhones.size}`);
-  } else {
-    for (let p of pPhones) {
-      if (!cPhones.has(p)) {
-        diffs.push(`Phone mismatch: "${p}"`);
-      }
-    }
-  }
+  const phonesToAdd = [...pPhones].filter(p => !cPhones.has(p));
+  const phonesToRemove = [...cPhones].filter(p => !pPhones.has(p));
+
+  if (phonesToAdd.length > 0) diffs.push(`Phone(s) to add: ${phonesToAdd.join(', ')}`);
+  if (phonesToRemove.length > 0) diffs.push(`Phone(s) to remove: ${phonesToRemove.join(', ')}`);
 
   // 5. Memberships
   // Filter API memberships to only include groups we know about (managed in the sheet)
@@ -306,15 +284,11 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   );
   const cGroups = new Set(getGroups(contact.memberships));
   
-  if (pGroups.size !== cGroups.size) {
-    diffs.push(`Label Count: ${pGroups.size} vs ${cGroups.size}`);
-  } else {
-    for (let g of pGroups) {
-      if (!cGroups.has(g)) {
-        diffs.push(`Label mismatch: Sheet has ${g} which Google lacks`);
-      }
-    }
-  }
+  const labelsToAdd = [...pGroups].filter(g => !cGroups.has(g));
+  const labelsToRemove = [...cGroups].filter(g => !pGroups.has(g));
+
+  if (labelsToAdd.length > 0) diffs.push(`Label(s) to add (ID): ${labelsToAdd.join(', ')}`);
+  if (labelsToRemove.length > 0) diffs.push(`Label(s) to remove (ID): ${labelsToRemove.join(', ')}`);
 
   if (diffs.length > 0) return diffs.join('; ');
   return null; // No difference found
