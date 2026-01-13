@@ -2,7 +2,7 @@
 Project Name: Contact Import
 Project Version: 9.01
 Filename: ExporttoContacts.gs
-File Version: 5.05
+File Version: 5.02
 Chat link: [Insert Link]
 */
 
@@ -26,8 +26,12 @@ function syncSheetsToContacts() {
   
   const colMap = mapHeaders(headers);
   const missingCols = [];
-  if (colMap.id === -1) missingCols.push("Resource ID");
-  if (colMap.labels === -1) missingCols.push("Labels");
+  if (colMap.id === -1) {
+    missingCols.push("Resource ID");
+  }
+  if (colMap.labels === -1) {
+    missingCols.push("Labels");
+  }
   if (missingCols.length > 0) {
     SpreadsheetApp.getUi().alert(`Error: Missing columns: ${missingCols.join(", ")}`);
     return;
@@ -142,9 +146,12 @@ New Labels: ${stats.labelsCreated}`;
  * @param {Object} colMap A map of header names to column indices.
  * @param {Object} stats The statistics object to update.
  * @param {Object} groupMap A map of contact group names to their resource names.
+ * @param {Object} idToLabelMap A map of resource names to label names.
  */
 function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
-  if (queue.length === 0) return;
+  if (queue.length === 0) {
+    return;
+  }
 
   const resourceNames = queue.map(item => item.resourceName);
   const resourceToSheetMap = {}; 
@@ -231,8 +238,11 @@ function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
  */
 function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabelMap) {
   const norm = (str) => (str || "").trim();
+  // Filter helper: Only keep fields that are editable CONTACT type (ignore Domain/System fields)
   const isEditable = (item) => {
-    if (!item.metadata || !item.metadata.source) return true; 
+    if (!item.metadata || !item.metadata.source) {
+        return true; // Assume true if no metadata (rare)
+    }
     return item.metadata.source.type === 'CONTACT';
   };
 
@@ -262,10 +272,12 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   }
 
   // 3. Emails (Compare VALUES ONLY)
+  // FILTER: Only compare against Google emails that are source: CONTACT
   const getEmailSig = (e) => norm(e.value).toLowerCase();
   
   const pEmails = new Set((payload.emailAddresses || []).map(getEmailSig));
   
+  // Filter Google emails to only those we can edit (User Contacts)
   const editableGoogleEmails = (contact.emailAddresses || []).filter(isEditable);
   const cEmails = new Set(editableGoogleEmails.map(getEmailSig));
   
@@ -282,11 +294,15 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   // 4. Phones (Compare Digits ONLY)
   const cleanPhone = (p) => {
     let s = norm(p.value).replace(/\D/g, "");
-    if (s.length === 11 && s.startsWith("1")) s = s.substring(1); 
+    if (s.length === 11 && s.startsWith("1")) {
+        s = s.substring(1); 
+    }
     return s;
   };
   
   const pPhones = new Set((payload.phoneNumbers || []).map(cleanPhone));
+  
+  // Filter Google phones to only those we can edit
   const editableGooglePhones = (contact.phoneNumbers || []).filter(isEditable);
   const cPhones = new Set(editableGooglePhones.map(cleanPhone));
   
@@ -301,6 +317,7 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   }
 
   // 5. Memberships
+  // Filter API memberships to only include groups we know about (managed in the sheet)
   const getGroups = (arr) => (arr || [])
     .map(m => m.contactGroupMembership ? m.contactGroupMembership.contactGroupResourceName : null)
     .filter(id => id && knownGroupIds.has(id)); 
@@ -332,12 +349,10 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
 }
 
 function constructContactPayload(row, colMap, groupResourceNames, etag) {
-  const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]).trim() : "";
+  const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]) : "";
 
   const payload = {};
-  if (etag) {
-    payload.etag = etag;
-  }
+  if (etag) payload.etag = etag;
 
   // Names
   const given = getVal(colMap.firstName);
