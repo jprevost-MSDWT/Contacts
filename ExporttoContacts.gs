@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 9.01
+Project Version: 10.01
 Filename: ExporttoContacts.gs
-File Version: 5.02
+File Version: 5.01
 Chat link: [Insert Link]
 */
 
@@ -26,24 +26,14 @@ function syncSheetsToContacts() {
   
   const colMap = mapHeaders(headers);
   const missingCols = [];
-  if (colMap.id === -1) {
-    missingCols.push("Resource ID");
-  }
-  if (colMap.labels === -1) {
-    missingCols.push("Labels");
-  }
+  if (colMap.id === -1) missingCols.push("Resource ID");
+  if (colMap.labels === -1) missingCols.push("Labels");
   if (missingCols.length > 0) {
     SpreadsheetApp.getUi().alert(`Error: Missing columns: ${missingCols.join(", ")}`);
     return;
   }
 
   let groupMap = fetchAllContactGroups();
-  
-  // Create Reverse Map for Logging (ID -> Name)
-  let idToLabelMap = {};
-  for (const [name, id] of Object.entries(groupMap)) {
-    idToLabelMap[id] = name;
-  }
 
   // Stats include 'changes' array to log specific reasons
   let stats = { updated: 0, created: 0, deleted: 0, labelsCreated: 0, errors: [], skipped: 0, unchanged: 0, changes: [] };
@@ -76,21 +66,15 @@ function syncSheetsToContacts() {
     const groupResourceNames = [];
     
     labels.forEach(label => {
-      if (label === "Delete from contacts") {
-        return;
-      }
+      if (label === "Delete from contacts") return;
       if (!groupMap[label]) {
         const newGroup = createContactGroup(label);
         if (newGroup) {
           groupMap[label] = newGroup;
-          // Update maps with new label
-          idToLabelMap[newGroup] = label;
           stats.labelsCreated++;
         }
       }
-      if (groupMap[label]) {
-        groupResourceNames.push(groupMap[label]);
-      }
+      if (groupMap[label]) groupResourceNames.push(groupMap[label]);
     });
 
     // --- QUEUE ---
@@ -110,14 +94,14 @@ function syncSheetsToContacts() {
     }
 
     if (updateQueue.length >= BATCH_SIZE) {
-      processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
+      processUpdateBatch(updateQueue, colMap, stats, groupMap);
       updateQueue = []; 
       Utilities.sleep(1000); 
     }
   }
 
   if (updateQueue.length > 0) {
-    processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
+    processUpdateBatch(updateQueue, colMap, stats, groupMap);
   }
 
   // --- REPORT ---
@@ -146,12 +130,9 @@ New Labels: ${stats.labelsCreated}`;
  * @param {Object} colMap A map of header names to column indices.
  * @param {Object} stats The statistics object to update.
  * @param {Object} groupMap A map of contact group names to their resource names.
- * @param {Object} idToLabelMap A map of resource names to label names.
  */
-function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
-  if (queue.length === 0) {
-    return;
-  }
+function processUpdateBatch(queue, colMap, stats, groupMap) {
+  if (queue.length === 0) return;
 
   const resourceNames = queue.map(item => item.resourceName);
   const resourceToSheetMap = {}; 
@@ -186,7 +167,7 @@ function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
           const payload = constructContactPayload(sheetItem.row, colMap, sheetItem.groupResourceNames, person.etag);
           
           // CHECK DIFFERENCES
-          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex, idToLabelMap);
+          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex);
           
           if (diffReason) {
             batchUpdatePayload[canonicalId] = payload;
@@ -236,13 +217,11 @@ function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
  * Returns a string reason if content is different, or null if identical.
  * Accumulates multiple differences.
  */
-function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabelMap) {
+function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const norm = (str) => (str || "").trim();
   // Filter helper: Only keep fields that are editable CONTACT type (ignore Domain/System fields)
   const isEditable = (item) => {
-    if (!item.metadata || !item.metadata.source) {
-        return true; // Assume true if no metadata (rare)
-    }
+    if (!item.metadata || !item.metadata.source) return true; // Assume true if no metadata (rare)
     return item.metadata.source.type === 'CONTACT';
   };
 
@@ -294,9 +273,7 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   // 4. Phones (Compare Digits ONLY)
   const cleanPhone = (p) => {
     let s = norm(p.value).replace(/\D/g, "");
-    if (s.length === 11 && s.startsWith("1")) {
-        s = s.substring(1); 
-    }
+    if (s.length === 11 && s.startsWith("1")) s = s.substring(1); 
     return s;
   };
   
@@ -341,10 +318,7 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
     diffs.push(`Label(s) to remove: ${names}`);
   }
 
-  if (diffs.length > 0) {
-    return diffs.join('; ');
-  }
-  
+  if (diffs.length > 0) return diffs.join('; ');
   return null; // No difference found
 }
 
@@ -379,9 +353,7 @@ function constructContactPayload(row, colMap, groupResourceNames, etag) {
   colMap.emails.forEach(pair => {
     const val = getVal(pair.valIdx);
     const type = getVal(pair.typeIdx);
-    if (val) {
-      emails.push({ value: val, type: type || 'other' });
-    }
+    if (val) emails.push({ value: val, type: type || 'other' });
   });
   payload.emailAddresses = emails; 
 
@@ -390,9 +362,7 @@ function constructContactPayload(row, colMap, groupResourceNames, etag) {
   colMap.phones.forEach(pair => {
     const val = getVal(pair.valIdx);
     const type = getVal(pair.typeIdx);
-    if (val) {
-      phones.push({ value: val, type: type || 'other' });
-    }
+    if (val) phones.push({ value: val, type: type || 'other' });
   });
   payload.phoneNumbers = phones;
 
@@ -416,16 +386,12 @@ function mapHeaders(headers) {
     if (/^Email \d+ - Value$/.test(h)) {
       const num = h.match(/\d+/)[0];
       const typeIdx = headers.indexOf(`Email ${num} - Type`);
-      if (typeIdx > -1) {
-        map.emails.push({ valIdx: i, typeIdx: typeIdx });
-      }
+      if (typeIdx > -1) map.emails.push({ valIdx: i, typeIdx: typeIdx });
     }
     if (/^Phone \d+ - Value$/.test(h)) {
       const num = h.match(/\d+/)[0];
       const typeIdx = headers.indexOf(`Phone ${num} - Type`);
-      if (typeIdx > -1) {
-        map.phones.push({ valIdx: i, typeIdx: typeIdx });
-      }
+      if (typeIdx > -1) map.phones.push({ valIdx: i, typeIdx: typeIdx });
     }
   });
   
