@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 9.07
+Project Version: 9.01
 Filename: ExporttoContacts.gs
-File Version: 5.03
+File Version: 5.05
 Chat link: [Insert Link]
 */
 
@@ -34,6 +34,12 @@ function syncSheetsToContacts() {
   }
 
   let groupMap = fetchAllContactGroups();
+  
+  // Create Reverse Map for Logging (ID -> Name)
+  let idToLabelMap = {};
+  for (const [name, id] of Object.entries(groupMap)) {
+    idToLabelMap[id] = name;
+  }
 
   // Stats include 'changes' array to log specific reasons
   let stats = { updated: 0, created: 0, deleted: 0, labelsCreated: 0, errors: [], skipped: 0, unchanged: 0, changes: [] };
@@ -66,15 +72,21 @@ function syncSheetsToContacts() {
     const groupResourceNames = [];
     
     labels.forEach(label => {
-      if (label === "Delete from contacts") return;
+      if (label === "Delete from contacts") {
+        return;
+      }
       if (!groupMap[label]) {
         const newGroup = createContactGroup(label);
         if (newGroup) {
           groupMap[label] = newGroup;
+          // Update maps with new label
+          idToLabelMap[newGroup] = label;
           stats.labelsCreated++;
         }
       }
-      if (groupMap[label]) groupResourceNames.push(groupMap[label]);
+      if (groupMap[label]) {
+        groupResourceNames.push(groupMap[label]);
+      }
     });
 
     // --- QUEUE ---
@@ -94,14 +106,14 @@ function syncSheetsToContacts() {
     }
 
     if (updateQueue.length >= BATCH_SIZE) {
-      processUpdateBatch(updateQueue, colMap, stats, groupMap);
+      processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
       updateQueue = []; 
       Utilities.sleep(1000); 
     }
   }
 
   if (updateQueue.length > 0) {
-    processUpdateBatch(updateQueue, colMap, stats, groupMap);
+    processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
   }
 
   // --- REPORT ---
@@ -122,7 +134,16 @@ New Labels: ${stats.labelsCreated}`;
   SpreadsheetApp.getUi().alert(msg);
 }
 
-function processUpdateBatch(queue, colMap, stats, groupMap) {
+/**
+ * Processes a batch of contacts to update.
+ * It fetches the full contact data from the People API, compares it with the sheet data,
+ * and sends a batch update request only for contacts with detected changes.
+ * @param {Array<Object>} queue The queue of items to process.
+ * @param {Object} colMap A map of header names to column indices.
+ * @param {Object} stats The statistics object to update.
+ * @param {Object} groupMap A map of contact group names to their resource names.
+ */
+function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
   if (queue.length === 0) return;
 
   const resourceNames = queue.map(item => item.resourceName);
@@ -158,7 +179,7 @@ function processUpdateBatch(queue, colMap, stats, groupMap) {
           const payload = constructContactPayload(sheetItem.row, colMap, sheetItem.groupResourceNames, person.etag);
           
           // CHECK DIFFERENCES
-          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex);
+          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex, idToLabelMap);
           
           if (diffReason) {
             batchUpdatePayload[canonicalId] = payload;
@@ -208,7 +229,7 @@ function processUpdateBatch(queue, colMap, stats, groupMap) {
  * Returns a string reason if content is different, or null if identical.
  * Accumulates multiple differences.
  */
-function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
+function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabelMap) {
   const norm = (str) => (str || "").trim();
   const isEditable = (item) => {
     if (!item.metadata || !item.metadata.source) return true; 
@@ -241,20 +262,22 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   }
 
   // 3. Emails (Compare VALUES ONLY)
-  // FILTER: Only compare against Google emails that are source: CONTACT
   const getEmailSig = (e) => norm(e.value).toLowerCase();
   
   const pEmails = new Set((payload.emailAddresses || []).map(getEmailSig));
   
-  // Filter Google emails to only those we can edit (User Contacts)
   const editableGoogleEmails = (contact.emailAddresses || []).filter(isEditable);
   const cEmails = new Set(editableGoogleEmails.map(getEmailSig));
   
   const emailsToAdd = [...pEmails].filter(e => !cEmails.has(e));
   const emailsToRemove = [...cEmails].filter(e => !pEmails.has(e));
 
-  if (emailsToAdd.length > 0) diffs.push(`Email(s) to add: ${emailsToAdd.join(', ')}`);
-  if (emailsToRemove.length > 0) diffs.push(`Email(s) to remove: ${emailsToRemove.join(', ')}`);
+  if (emailsToAdd.length > 0) {
+    diffs.push(`Email(s) to add: ${emailsToAdd.join(', ')}`);
+  }
+  if (emailsToRemove.length > 0) {
+    diffs.push(`Email(s) to remove: ${emailsToRemove.join(', ')}`);
+  }
 
   // 4. Phones (Compare Digits ONLY)
   const cleanPhone = (p) => {
@@ -270,11 +293,14 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const phonesToAdd = [...pPhones].filter(p => !cPhones.has(p));
   const phonesToRemove = [...cPhones].filter(p => !pPhones.has(p));
 
-  if (phonesToAdd.length > 0) diffs.push(`Phone(s) to add: ${phonesToAdd.join(', ')}`);
-  if (phonesToRemove.length > 0) diffs.push(`Phone(s) to remove: ${phonesToRemove.join(', ')}`);
+  if (phonesToAdd.length > 0) {
+    diffs.push(`Phone(s) to add: ${phonesToAdd.join(', ')}`);
+  }
+  if (phonesToRemove.length > 0) {
+    diffs.push(`Phone(s) to remove: ${phonesToRemove.join(', ')}`);
+  }
 
   // 5. Memberships
-  // Filter API memberships to only include groups we know about (managed in the sheet)
   const getGroups = (arr) => (arr || [])
     .map(m => m.contactGroupMembership ? m.contactGroupMembership.contactGroupResourceName : null)
     .filter(id => id && knownGroupIds.has(id)); 
@@ -287,10 +313,21 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const labelsToAdd = [...pGroups].filter(g => !cGroups.has(g));
   const labelsToRemove = [...cGroups].filter(g => !pGroups.has(g));
 
-  if (labelsToAdd.length > 0) diffs.push(`Label(s) to add (ID): ${labelsToAdd.join(', ')}`);
-  if (labelsToRemove.length > 0) diffs.push(`Label(s) to remove (ID): ${labelsToRemove.join(', ')}`);
+  const getLabelName = (id) => idToLabelMap[id] || id;
 
-  if (diffs.length > 0) return diffs.join('; ');
+  if (labelsToAdd.length > 0) {
+    const names = labelsToAdd.map(getLabelName).join(', ');
+    diffs.push(`Label(s) to add: ${names}`);
+  }
+  if (labelsToRemove.length > 0) {
+    const names = labelsToRemove.map(getLabelName).join(', ');
+    diffs.push(`Label(s) to remove: ${names}`);
+  }
+
+  if (diffs.length > 0) {
+    return diffs.join('; ');
+  }
+  
   return null; // No difference found
 }
 
@@ -298,7 +335,9 @@ function constructContactPayload(row, colMap, groupResourceNames, etag) {
   const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]).trim() : "";
 
   const payload = {};
-  if (etag) payload.etag = etag;
+  if (etag) {
+    payload.etag = etag;
+  }
 
   // Names
   const given = getVal(colMap.firstName);
@@ -325,7 +364,9 @@ function constructContactPayload(row, colMap, groupResourceNames, etag) {
   colMap.emails.forEach(pair => {
     const val = getVal(pair.valIdx);
     const type = getVal(pair.typeIdx);
-    if (val) emails.push({ value: val, type: type || 'other' });
+    if (val) {
+      emails.push({ value: val, type: type || 'other' });
+    }
   });
   payload.emailAddresses = emails; 
 
@@ -334,7 +375,9 @@ function constructContactPayload(row, colMap, groupResourceNames, etag) {
   colMap.phones.forEach(pair => {
     const val = getVal(pair.valIdx);
     const type = getVal(pair.typeIdx);
-    if (val) phones.push({ value: val, type: type || 'other' });
+    if (val) {
+      phones.push({ value: val, type: type || 'other' });
+    }
   });
   payload.phoneNumbers = phones;
 
@@ -358,12 +401,16 @@ function mapHeaders(headers) {
     if (/^Email \d+ - Value$/.test(h)) {
       const num = h.match(/\d+/)[0];
       const typeIdx = headers.indexOf(`Email ${num} - Type`);
-      if (typeIdx > -1) map.emails.push({ valIdx: i, typeIdx: typeIdx });
+      if (typeIdx > -1) {
+        map.emails.push({ valIdx: i, typeIdx: typeIdx });
+      }
     }
     if (/^Phone \d+ - Value$/.test(h)) {
       const num = h.match(/\d+/)[0];
       const typeIdx = headers.indexOf(`Phone ${num} - Type`);
-      if (typeIdx > -1) map.phones.push({ valIdx: i, typeIdx: typeIdx });
+      if (typeIdx > -1) {
+        map.phones.push({ valIdx: i, typeIdx: typeIdx });
+      }
     }
   });
   
