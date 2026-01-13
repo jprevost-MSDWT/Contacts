@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 10.01
+Project Version: 9.01
 Filename: ExporttoContacts.gs
-File Version: 5.01
+File Version: 5.02
 Chat link: [Insert Link]
 */
 
@@ -26,14 +26,24 @@ function syncSheetsToContacts() {
   
   const colMap = mapHeaders(headers);
   const missingCols = [];
-  if (colMap.id === -1) missingCols.push("Resource ID");
-  if (colMap.labels === -1) missingCols.push("Labels");
+  if (colMap.id === -1) {
+    missingCols.push("Resource ID");
+  }
+  if (colMap.labels === -1) {
+    missingCols.push("Labels");
+  }
   if (missingCols.length > 0) {
     SpreadsheetApp.getUi().alert(`Error: Missing columns: ${missingCols.join(", ")}`);
     return;
   }
 
   let groupMap = fetchAllContactGroups();
+  
+  // Create Reverse Map for Logging (ID -> Name)
+  let idToLabelMap = {};
+  for (const [name, id] of Object.entries(groupMap)) {
+    idToLabelMap[id] = name;
+  }
 
   // Stats include 'changes' array to log specific reasons
   let stats = { updated: 0, created: 0, deleted: 0, labelsCreated: 0, errors: [], skipped: 0, unchanged: 0, changes: [] };
@@ -66,15 +76,21 @@ function syncSheetsToContacts() {
     const groupResourceNames = [];
     
     labels.forEach(label => {
-      if (label === "Delete from contacts") return;
+      if (label === "Delete from contacts") {
+        return;
+      }
       if (!groupMap[label]) {
         const newGroup = createContactGroup(label);
         if (newGroup) {
           groupMap[label] = newGroup;
+          // Update maps with new label
+          idToLabelMap[newGroup] = label;
           stats.labelsCreated++;
         }
       }
-      if (groupMap[label]) groupResourceNames.push(groupMap[label]);
+      if (groupMap[label]) {
+        groupResourceNames.push(groupMap[label]);
+      }
     });
 
     // --- QUEUE ---
@@ -94,14 +110,14 @@ function syncSheetsToContacts() {
     }
 
     if (updateQueue.length >= BATCH_SIZE) {
-      processUpdateBatch(updateQueue, colMap, stats, groupMap);
+      processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
       updateQueue = []; 
       Utilities.sleep(1000); 
     }
   }
 
   if (updateQueue.length > 0) {
-    processUpdateBatch(updateQueue, colMap, stats, groupMap);
+    processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
   }
 
   // --- REPORT ---
@@ -130,9 +146,12 @@ New Labels: ${stats.labelsCreated}`;
  * @param {Object} colMap A map of header names to column indices.
  * @param {Object} stats The statistics object to update.
  * @param {Object} groupMap A map of contact group names to their resource names.
+ * @param {Object} idToLabelMap A map of resource names to label names.
  */
-function processUpdateBatch(queue, colMap, stats, groupMap) {
-  if (queue.length === 0) return;
+function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
+  if (queue.length === 0) {
+    return;
+  }
 
   const resourceNames = queue.map(item => item.resourceName);
   const resourceToSheetMap = {}; 
@@ -167,7 +186,7 @@ function processUpdateBatch(queue, colMap, stats, groupMap) {
           const payload = constructContactPayload(sheetItem.row, colMap, sheetItem.groupResourceNames, person.etag);
           
           // CHECK DIFFERENCES
-          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex);
+          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex, idToLabelMap);
           
           if (diffReason) {
             batchUpdatePayload[canonicalId] = payload;
@@ -217,11 +236,13 @@ function processUpdateBatch(queue, colMap, stats, groupMap) {
  * Returns a string reason if content is different, or null if identical.
  * Accumulates multiple differences.
  */
-function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
+function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabelMap) {
   const norm = (str) => (str || "").trim();
   // Filter helper: Only keep fields that are editable CONTACT type (ignore Domain/System fields)
   const isEditable = (item) => {
-    if (!item.metadata || !item.metadata.source) return true; // Assume true if no metadata (rare)
+    if (!item.metadata || !item.metadata.source) {
+        return true; // Assume true if no metadata (rare)
+    }
     return item.metadata.source.type === 'CONTACT';
   };
 
@@ -273,7 +294,9 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   // 4. Phones (Compare Digits ONLY)
   const cleanPhone = (p) => {
     let s = norm(p.value).replace(/\D/g, "");
-    if (s.length === 11 && s.startsWith("1")) s = s.substring(1); 
+    if (s.length === 11 && s.startsWith("1")) {
+        s = s.substring(1); 
+    }
     return s;
   };
   
@@ -318,117 +341,9 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
     diffs.push(`Label(s) to remove: ${names}`);
   }
 
-  if (diffs.length > 0) return diffs.join('; ');
-  return null; // No difference found
-}
-
-function constructContactPayload(row, colMap, groupResourceNames, etag) {
-  const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]) : "";
-
-  const payload = {};
-  if (etag) payload.etag = etag;
-
-  // Names
-  const given = getVal(colMap.firstName);
-  const family = getVal(colMap.lastName);
-  if (given || family) {
-    payload.names = [{ givenName: given, familyName: family }];
+  if (diffs.length > 0) {
+    return diffs.join('; ');
   }
-
-  // Organizations
-  const orgName = getVal(colMap.orgName);
-  const orgTitle = getVal(colMap.orgTitle);
-  const orgDept = getVal(colMap.orgDept);
-  if (orgName || orgTitle || orgDept) {
-    payload.organizations = [{ name: orgName, title: orgTitle, department: orgDept }];
-  }
-
-  // Memberships
-  payload.memberships = groupResourceNames.map(grp => ({
-    contactGroupMembership: { contactGroupResourceName: grp }
-  }));
-
-  // Emails
-  const emails = [];
-  colMap.emails.forEach(pair => {
-    const val = getVal(pair.valIdx);
-    const type = getVal(pair.typeIdx);
-    if (val) emails.push({ value: val, type: type || 'other' });
-  });
-  payload.emailAddresses = emails; 
-
-  // Phones
-  const phones = [];
-  colMap.phones.forEach(pair => {
-    const val = getVal(pair.valIdx);
-    const type = getVal(pair.typeIdx);
-    if (val) phones.push({ value: val, type: type || 'other' });
-  });
-  payload.phoneNumbers = phones;
-
-  return payload;
-}
-
-function mapHeaders(headers) {
-  const map = {
-    id: headers.indexOf("Resource ID"),
-    firstName: headers.indexOf("First Name"),
-    lastName: headers.indexOf("Last Name"),
-    labels: headers.indexOf("Labels"),
-    orgName: headers.indexOf("Organization 1 - Company"),
-    orgTitle: headers.indexOf("Organization 1 - Title"),
-    orgDept: headers.indexOf("Organization 1 - Department"),
-    emails: [],
-    phones: []
-  };
-
-  headers.forEach((h, i) => {
-    if (/^Email \d+ - Value$/.test(h)) {
-      const num = h.match(/\d+/)[0];
-      const typeIdx = headers.indexOf(`Email ${num} - Type`);
-      if (typeIdx > -1) map.emails.push({ valIdx: i, typeIdx: typeIdx });
-    }
-    if (/^Phone \d+ - Value$/.test(h)) {
-      const num = h.match(/\d+/)[0];
-      const typeIdx = headers.indexOf(`Phone ${num} - Type`);
-      if (typeIdx > -1) map.phones.push({ valIdx: i, typeIdx: typeIdx });
-    }
-  });
   
-  return map;
-}
-
-function fetchAllContactGroups() {
-  const map = {};
-  let pageToken;
-  try {
-    do {
-      const response = People.ContactGroups.list({
-        groupFields: 'name',
-        pageSize: 1000,
-        pageToken: pageToken
-      });
-      if (response.contactGroups) {
-        response.contactGroups.forEach(g => {
-          map[g.formattedName] = g.resourceName;
-        });
-      }
-      pageToken = response.nextPageToken;
-    } while (pageToken);
-  } catch (e) {
-    console.log("Error fetching groups: " + e.message);
-  }
-  return map;
-}
-
-function createContactGroup(name) {
-  try {
-    const response = People.ContactGroups.create({
-      contactGroup: { name: name }
-    });
-    return response.resourceName;
-  } catch (e) {
-    console.log(`Error creating label '${name}': ` + e.message);
-    return null;
-  }
+  return null; // No difference found
 }
