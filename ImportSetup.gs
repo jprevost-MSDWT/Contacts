@@ -284,12 +284,15 @@ function SetupSheetFormatting() {
   const rangeA = sheet.getRange(2, 1, sheet.getMaxRows() - 1, 1);
 
   // 1. DATA COLUMNS: Phone Error (Red BG)
+  // Logic: If Value is invalid, highlight Value AND Type
   phonePairs.forEach(pair => {
+    // Value Range & Type Range
     const ranges = [
       sheet.getRange(2, pair.valueIndex + 1, sheet.getMaxRows() - 1, 1),
       sheet.getRange(2, pair.typeIndex + 1, sheet.getMaxRows() - 1, 1)
     ];
     
+    // Formula checks Value Column ($Letter)
     const valColLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
     const cellRef = `$${valColLetter}2`;
     
@@ -302,6 +305,7 @@ function SetupSheetFormatting() {
   });
 
   // 2. DATA COLUMNS: Email Error (Red Text)
+  // Logic: If Value is invalid (e.g. phone number in email), highlight Value AND Type
   const emailRegex = "^[\\w.%+-]+@[\\w.-]+\\.[a-zA-Z]{2,}$";
   emailPairs.forEach(pair => {
     const ranges = [
@@ -364,6 +368,7 @@ function SetupSheetFormatting() {
   if (emailPairs.length > 0) {
     const nonWarrenConditions = emailPairs.map(pair => {
       const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
+      // Email not empty AND does not contain warren domain
       return `AND($${colLetter}2<>"", ISERROR(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2)))`;
     });
     
@@ -384,6 +389,7 @@ function SetupSheetFormatting() {
       return `ISNUMBER(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2))`;
     });
     
+    // All emails must be either empty OR Warren
     const noNonWarrenConditions = emailPairs.map(pair => {
       const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
       return `OR($${colLetter}2="", ISNUMBER(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2)))`;
@@ -402,7 +408,7 @@ function SetupSheetFormatting() {
     
     rules.push(SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied(cleanFormula)
-      .setFontColor(CONFIG.WARREN_COLOR) 
+      .setFontColor(CONFIG.WARREN_COLOR) // Changed from setBackground to setFontColor
       .setRanges([rangeA])
       .build());
   }
