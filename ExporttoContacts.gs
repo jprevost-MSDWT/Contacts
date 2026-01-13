@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 9.01
+Project Version: 9.04
 Filename: ExporttoContacts.gs
-File Version: 4.01
+File Version: 4.03
 Chat link: [Insert Link]
 */
 
@@ -122,6 +122,15 @@ New Labels: ${stats.labelsCreated}`;
   SpreadsheetApp.getUi().alert(msg);
 }
 
+/**
+ * Processes a batch of contacts to update.
+ * It fetches the full contact data from the People API, compares it with the sheet data,
+ * and sends a batch update request only for contacts with detected changes.
+ * @param {Array<Object>} queue The queue of items to process.
+ * @param {Object} colMap A map of header names to column indices.
+ * @param {Object} stats The statistics object to update.
+ * @param {Object} groupMap A map of contact group names to their resource names.
+ */
 function processUpdateBatch(queue, colMap, stats, groupMap) {
   if (queue.length === 0) return;
 
@@ -164,7 +173,7 @@ function processUpdateBatch(queue, colMap, stats, groupMap) {
             batchUpdatePayload[canonicalId] = payload;
             validIds.push(canonicalId);
             stats.changes.push(`Row ${sheetItem.rowIndex}: ${diffReason}`);
-            Logger.log(`[Diff Row ${sheetItem.rowIndex}] ${diffReason}`); // Changed to Logger.log
+            Logger.log(`[Diff Row ${sheetItem.rowIndex}] ${diffReason}`); 
           } else {
             stats.unchanged++;
           }
@@ -190,6 +199,8 @@ function processUpdateBatch(queue, colMap, stats, groupMap) {
            const successes = Object.keys(updateResponse.updateResult).length;
            stats.updated += successes;
         } else {
+           // Fallback with Warning
+           Logger.log(`Batch update response missing 'updateResult' for ${validIds.length} contacts. Optimistically assuming success.`);
            stats.updated += validIds.length;
         }
       } catch (batchErr) {
@@ -214,27 +225,29 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
     return item.metadata.source.type === 'CONTACT';
   };
 
+  const diffs = [];
+
   // 1. Names
   const pName = payload.names ? payload.names[0] : {};
   const cName = (contact.names && contact.names.length > 0) ? contact.names[0] : {};
   if (norm(pName.givenName) !== norm(cName.givenName)) {
-    return `Name (Given): "${pName.givenName}" != "${cName.givenName}"`;
+    diffs.push(`Name (Given): "${pName.givenName}" != "${cName.givenName}"`);
   }
   if (norm(pName.familyName) !== norm(cName.familyName)) {
-    return `Name (Family): "${pName.familyName}" != "${cName.familyName}"`;
+    diffs.push(`Name (Family): "${pName.familyName}" != "${cName.familyName}"`);
   }
 
   // 2. Organizations
   const pOrg = payload.organizations ? payload.organizations[0] : {};
   const cOrg = (contact.organizations && contact.organizations.length > 0) ? contact.organizations[0] : {};
   if (norm(pOrg.name) !== norm(cOrg.name)) {
-    return `Org Name: "${pOrg.name}" != "${cOrg.name}"`;
+    diffs.push(`Org Name: "${pOrg.name}" != "${cOrg.name}"`);
   }
   if (norm(pOrg.title) !== norm(cOrg.title)) {
-    return `Org Title: "${pOrg.title}" != "${cOrg.title}"`;
+    diffs.push(`Org Title: "${pOrg.title}" != "${cOrg.title}"`);
   }
   if (norm(pOrg.department) !== norm(cOrg.department)) {
-    return `Org Dept: "${pOrg.department}" != "${cOrg.department}"`;
+    diffs.push(`Org Dept: "${pOrg.department}" != "${cOrg.department}"`);
   }
 
   // 3. Emails (Compare VALUES ONLY)
@@ -248,11 +261,11 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const cEmails = new Set(editableGoogleEmails.map(getEmailSig));
   
   if (pEmails.size !== cEmails.size) {
-    return `Email Count: ${pEmails.size} vs ${cEmails.size} (Google Editable: ${editableGoogleEmails.length})`;
+    diffs.push(`Email Count: ${pEmails.size} vs ${cEmails.size} (Google Editable: ${editableGoogleEmails.length})`);
   } else {
     for (let e of pEmails) {
       if (!cEmails.has(e)) {
-        return `Email mismatch: "${e}" not found in Google`;
+        diffs.push(`Email mismatch: "${e}" not found in Google`);
       }
     }
   }
@@ -271,11 +284,11 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const cPhones = new Set(editableGooglePhones.map(cleanPhone));
   
   if (pPhones.size !== cPhones.size) {
-    return `Phone Count: ${pPhones.size} vs ${cPhones.size}`;
+    diffs.push(`Phone Count: ${pPhones.size} vs ${cPhones.size}`);
   } else {
     for (let p of pPhones) {
       if (!cPhones.has(p)) {
-        return `Phone mismatch: "${p}"`;
+        diffs.push(`Phone mismatch: "${p}"`);
       }
     }
   }
@@ -292,15 +305,16 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const cGroups = new Set(getGroups(contact.memberships));
   
   if (pGroups.size !== cGroups.size) {
-    return `Label Count: ${pGroups.size} vs ${cGroups.size}`;
+    diffs.push(`Label Count: ${pGroups.size} vs ${cGroups.size}`);
   } else {
     for (let g of pGroups) {
       if (!cGroups.has(g)) {
-        return `Label mismatch: Sheet has ${g} which Google lacks`;
+        diffs.push(`Label mismatch: Sheet has ${g} which Google lacks`);
       }
     }
   }
 
+  if (diffs.length > 0) return diffs.join('; ');
   return null; // No difference found
 }
 
