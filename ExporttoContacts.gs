@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 9.04
+Project Version: 9.01
 Filename: ExporttoContacts.gs
-File Version: 4.03
+File Version: 5.02
 Chat link: [Insert Link]
 */
 
@@ -260,14 +260,16 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const editableGoogleEmails = (contact.emailAddresses || []).filter(isEditable);
   const cEmails = new Set(editableGoogleEmails.map(getEmailSig));
   
-  if (pEmails.size !== cEmails.size) {
-    diffs.push(`Email Count: ${pEmails.size} vs ${cEmails.size} (Google Editable: ${editableGoogleEmails.length})`);
-  } else {
-    for (let e of pEmails) {
-      if (!cEmails.has(e)) {
-        diffs.push(`Email mismatch: "${e}" not found in Google`);
-      }
-    }
+  // Check for additions
+  const emailsToAdd = [...pEmails].filter(e => !cEmails.has(e));
+  if (emailsToAdd.length > 0) {
+    diffs.push(`Email(s) to add: ${emailsToAdd.join(', ')}`);
+  }
+
+  // Check for removals
+  const emailsToRemove = [...cEmails].filter(e => !pEmails.has(e));
+  if (emailsToRemove.length > 0) {
+    diffs.push(`Email(s) to remove: ${emailsToRemove.join(', ')}`);
   }
 
   // 4. Phones (Compare Digits ONLY)
