@@ -2,7 +2,7 @@
 Project Name: Contact Import
 Project Version: 9.01
 Filename: ExporttoContacts.gs
-File Version: 5.05
+File Version: 5.02
 Chat link: [Insert Link]
 */
 
@@ -26,8 +26,12 @@ function syncSheetsToContacts() {
   
   const colMap = mapHeaders(headers);
   const missingCols = [];
-  if (colMap.id === -1) missingCols.push("Resource ID");
-  if (colMap.labels === -1) missingCols.push("Labels");
+  if (colMap.id === -1) {
+    missingCols.push("Resource ID");
+  }
+  if (colMap.labels === -1) {
+    missingCols.push("Labels");
+  }
   if (missingCols.length > 0) {
     SpreadsheetApp.getUi().alert(`Error: Missing columns: ${missingCols.join(", ")}`);
     return;
@@ -142,9 +146,12 @@ New Labels: ${stats.labelsCreated}`;
  * @param {Object} colMap A map of header names to column indices.
  * @param {Object} stats The statistics object to update.
  * @param {Object} groupMap A map of contact group names to their resource names.
+ * @param {Object} idToLabelMap A map of resource names to label names.
  */
 function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
-  if (queue.length === 0) return;
+  if (queue.length === 0) {
+    return;
+  }
 
   const resourceNames = queue.map(item => item.resourceName);
   const resourceToSheetMap = {}; 
@@ -231,8 +238,11 @@ function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
  */
 function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabelMap) {
   const norm = (str) => (str || "").trim();
+  // Filter helper: Only keep fields that are editable CONTACT type (ignore Domain/System fields)
   const isEditable = (item) => {
-    if (!item.metadata || !item.metadata.source) return true; 
+    if (!item.metadata || !item.metadata.source) {
+        return true; // Assume true if no metadata (rare)
+    }
     return item.metadata.source.type === 'CONTACT';
   };
 
@@ -262,10 +272,12 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   }
 
   // 3. Emails (Compare VALUES ONLY)
+  // FILTER: Only compare against Google emails that are source: CONTACT
   const getEmailSig = (e) => norm(e.value).toLowerCase();
   
   const pEmails = new Set((payload.emailAddresses || []).map(getEmailSig));
   
+  // Filter Google emails to only those we can edit (User Contacts)
   const editableGoogleEmails = (contact.emailAddresses || []).filter(isEditable);
   const cEmails = new Set(editableGoogleEmails.map(getEmailSig));
   
@@ -282,11 +294,15 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   // 4. Phones (Compare Digits ONLY)
   const cleanPhone = (p) => {
     let s = norm(p.value).replace(/\D/g, "");
-    if (s.length === 11 && s.startsWith("1")) s = s.substring(1); 
+    if (s.length === 11 && s.startsWith("1")) {
+        s = s.substring(1); 
+    }
     return s;
   };
   
   const pPhones = new Set((payload.phoneNumbers || []).map(cleanPhone));
+  
+  // Filter Google phones to only those we can edit
   const editableGooglePhones = (contact.phoneNumbers || []).filter(isEditable);
   const cPhones = new Set(editableGooglePhones.map(cleanPhone));
   
@@ -301,6 +317,7 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   }
 
   // 5. Memberships
+  // Filter API memberships to only include groups we know about (managed in the sheet)
   const getGroups = (arr) => (arr || [])
     .map(m => m.contactGroupMembership ? m.contactGroupMembership.contactGroupResourceName : null)
     .filter(id => id && knownGroupIds.has(id)); 
@@ -329,125 +346,4 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   }
   
   return null; // No difference found
-}
-
-function constructContactPayload(row, colMap, groupResourceNames, etag) {
-  const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]).trim() : "";
-
-  const payload = {};
-  if (etag) {
-    payload.etag = etag;
-  }
-
-  // Names
-  const given = getVal(colMap.firstName);
-  const family = getVal(colMap.lastName);
-  if (given || family) {
-    payload.names = [{ givenName: given, familyName: family }];
-  }
-
-  // Organizations
-  const orgName = getVal(colMap.orgName);
-  const orgTitle = getVal(colMap.orgTitle);
-  const orgDept = getVal(colMap.orgDept);
-  if (orgName || orgTitle || orgDept) {
-    payload.organizations = [{ name: orgName, title: orgTitle, department: orgDept }];
-  }
-
-  // Memberships
-  payload.memberships = groupResourceNames.map(grp => ({
-    contactGroupMembership: { contactGroupResourceName: grp }
-  }));
-
-  // Emails
-  const emails = [];
-  colMap.emails.forEach(pair => {
-    const val = getVal(pair.valIdx);
-    const type = getVal(pair.typeIdx);
-    if (val) {
-      emails.push({ value: val, type: type || 'other' });
-    }
-  });
-  payload.emailAddresses = emails; 
-
-  // Phones
-  const phones = [];
-  colMap.phones.forEach(pair => {
-    const val = getVal(pair.valIdx);
-    const type = getVal(pair.typeIdx);
-    if (val) {
-      phones.push({ value: val, type: type || 'other' });
-    }
-  });
-  payload.phoneNumbers = phones;
-
-  return payload;
-}
-
-function mapHeaders(headers) {
-  const map = {
-    id: headers.indexOf("Resource ID"),
-    firstName: headers.indexOf("First Name"),
-    lastName: headers.indexOf("Last Name"),
-    labels: headers.indexOf("Labels"),
-    orgName: headers.indexOf("Organization 1 - Company"),
-    orgTitle: headers.indexOf("Organization 1 - Title"),
-    orgDept: headers.indexOf("Organization 1 - Department"),
-    emails: [],
-    phones: []
-  };
-
-  headers.forEach((h, i) => {
-    if (/^Email \d+ - Value$/.test(h)) {
-      const num = h.match(/\d+/)[0];
-      const typeIdx = headers.indexOf(`Email ${num} - Type`);
-      if (typeIdx > -1) {
-        map.emails.push({ valIdx: i, typeIdx: typeIdx });
-      }
-    }
-    if (/^Phone \d+ - Value$/.test(h)) {
-      const num = h.match(/\d+/)[0];
-      const typeIdx = headers.indexOf(`Phone ${num} - Type`);
-      if (typeIdx > -1) {
-        map.phones.push({ valIdx: i, typeIdx: typeIdx });
-      }
-    }
-  });
-  
-  return map;
-}
-
-function fetchAllContactGroups() {
-  const map = {};
-  let pageToken;
-  try {
-    do {
-      const response = People.ContactGroups.list({
-        groupFields: 'name',
-        pageSize: 1000,
-        pageToken: pageToken
-      });
-      if (response.contactGroups) {
-        response.contactGroups.forEach(g => {
-          map[g.formattedName] = g.resourceName;
-        });
-      }
-      pageToken = response.nextPageToken;
-    } while (pageToken);
-  } catch (e) {
-    console.log("Error fetching groups: " + e.message);
-  }
-  return map;
-}
-
-function createContactGroup(name) {
-  try {
-    const response = People.ContactGroups.create({
-      contactGroup: { name: name }
-    });
-    return response.resourceName;
-  } catch (e) {
-    console.log(`Error creating label '${name}': ` + e.message);
-    return null;
-  }
 }

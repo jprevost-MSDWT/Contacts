@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 9.01
+Project Version: 9.12
 Filename: ImportSetup.gs
-File Version: 4.01
+File Version: 4.05
 Chat link: [Insert Link]
 */
 
@@ -115,8 +115,9 @@ function SetupSheetFormatting_DataValidation_Only() {
  * Sorts "Labels" cell values based on priority list.
  * Sorts ROWS based on priority list.
  * Highlights invalid phone numbers with red TEXT.
+ * Highlights DUPLICATE phone/emails with orange TEXT (via Conditional Formatting).
  * Formats @warren.k12.in.us emails: Sets Type to "Work" and highlights text gray.
- * Highlights Row ID (Col A) based on row status (Error, Contractor, Clean, etc).
+ * Highlights Row ID (Col A) based on row status (Error, Duplicate, Contractor, Clean, etc).
  * Trims sheet exactly to the last row of data.
  * Copies Validation from Row 2 of Labels column down to the rest.
  */
@@ -146,6 +147,8 @@ function SetupSheetFormatting() {
   // Note: We use 'let' for values because we will modify it (sort rows)
   let values = dataRange.getValues();
   const headers = values[0];
+  let backgrounds = dataRange.getBackgrounds();
+  let fontColors = dataRange.getFontColors();
   
   // 1. Identify Columns
   const phonePairs = [];
@@ -187,35 +190,79 @@ function SetupSheetFormatting() {
   const rowSortTop = CONFIG.Row_Labels_Sort_Order_Top.split(',').map(s => s.trim());
   const rowSortBottom = CONFIG.Row_Labels_Sort_Order_Bottom.split(',').map(s => s.trim());
 
-  // Iterate rows (skip header) for Data Cleanup (In-Cell)
+  let hasChanges = false;
+  let hasFormatChanges = false;
+
+  // Iterate rows (skip header) for Data Cleanup (In-Cell) 
+  // Note: We removed manual duplicate highlighting from here to use CF instead
   for (let r = 1; r < values.length; r++) {
     const row = values[r];
     
-    // --- Phone Logic (Normalize Values) ---
+    // Duplicate Tracking Sets for this Row
+    const seenPhones = new Set();
+    const seenEmails = new Set();
+    let rowHasDuplicate = false;
+
+    // --- Phone Logic (Normalize & Dupe Check) ---
     phonePairs.forEach(pair => {
       let val = row[pair.valueIndex];
       if (val) {
         let strVal = String(val);
+        // Normalize for formatting
         let clean = strVal.replace(/\D/g, '');
         if (clean.length === 11 && clean.startsWith('1')) clean = clean.substring(1);
         if (clean.length === 10) {
           const formatted = `(${clean.substring(0, 3)}) ${clean.substring(3, 6)}-${clean.substring(6, 10)}`;
           if (strVal !== formatted) {
             values[r][pair.valueIndex] = formatted;
+            val = formatted; // Update local var for set check
           }
+        }
+
+        // Normalize for Duplicate Check (digits only)
+        const dupCheckVal = strVal.replace(/\D/g, '');
+        if (seenPhones.has(dupCheckVal)) {
+          // DUPLICATE FOUND
+          fontColors[r][pair.valueIndex] = CONFIG.Dup_Color;
+          rowHasDuplicate = true;
+          hasFormatChanges = true;
+        } else {
+          seenPhones.add(dupCheckVal);
         }
       }
     });
 
-    // --- Email Logic (Update Types) ---
+    // --- Email Logic (Update Types & Dupe Check) ---
     emailPairs.forEach(pair => {
       const emailVal = row[pair.valueIndex];
-      if (emailVal && String(emailVal).toLowerCase().includes(CONFIG.WARREN_DOMAIN)) {
-        if (values[r][pair.typeIndex] !== 'Work') {
-           values[r][pair.typeIndex] = 'Work';
+      if (emailVal) {
+        let strEmail = String(emailVal).toLowerCase(); // Normalize for comparison
+        
+        // Update Warren Type
+        if (strEmail.includes(CONFIG.WARREN_DOMAIN)) {
+          if (values[r][pair.typeIndex] !== 'Work') {
+             values[r][pair.typeIndex] = 'Work';
+          }
+        }
+        
+        // Duplicate Check
+        const compVal = String(emailVal).trim().toLowerCase();
+        if (seenEmails.has(compVal)) {
+           // DUPLICATE FOUND
+           fontColors[r][pair.valueIndex] = CONFIG.Dup_Color;
+           rowHasDuplicate = true;
+           hasFormatChanges = true;
+        } else {
+           seenEmails.add(compVal);
         }
       }
     });
+
+    // --- Row Duplicate Warning (Manual Background) ---
+    if (rowHasDuplicate) {
+      backgrounds[r][0] = CONFIG.COLUMN_A_WARNING_COLOR;
+      hasFormatChanges = true;
+    }
 
     // --- Label Sorting Logic (Sort string inside cell) ---
     if (labelsColumnIndex !== -1) {
@@ -237,6 +284,7 @@ function SetupSheetFormatting() {
         const newLabelString = labels.join(', ');
         if (newLabelString !== labelVal) {
           values[r][labelsColumnIndex] = newLabelString;
+          hasChanges = true;
         }
       }
     }
@@ -244,170 +292,169 @@ function SetupSheetFormatting() {
 
   // --- Row Sorting Logic (Sort rows by priority) ---
   if (labelsColumnIndex !== -1) {
-    // Separate header
     const headerRow = values.shift(); 
+    // We must also shift the format arrays to keep alignment if we sort
+    // Shift off header color (row 0)
+    const headerBg = backgrounds.shift();
+    const headerFc = fontColors.shift();
 
-    values.sort((a, b) => {
-      const getPriorityScore = (row) => {
-        const labelStr = (row[labelsColumnIndex] || "").toString();
-        
-        // Priority Top (Score 1..99)
+    // Create array of objects to sort everything together
+    const combined = values.map((row, i) => ({
+       row: row,
+       bg: backgrounds[i],
+       fc: fontColors[i]
+    }));
+
+    combined.sort((a, b) => {
+      const getPriorityScore = (item) => {
+        const labelStr = (item.row[labelsColumnIndex] || "").toString();
         for (let i = 0; i < rowSortTop.length; i++) {
            if (labelStr.includes(rowSortTop[i])) return i + 1;
         }
-        
-        // Priority Bottom (Score 200..299)
         for (let i = 0; i < rowSortBottom.length; i++) {
            if (labelStr.includes(rowSortBottom[i])) return 200 + i;
         }
-        
-        // Default (Middle - Score 100)
         return 100; 
       };
       
-      const scoreA = getPriorityScore(a);
-      const scoreB = getPriorityScore(b);
-      
-      return scoreA - scoreB;
+      return getPriorityScore(a) - getPriorityScore(b);
     });
 
-    // Add header back
+    // Unpack sorted arrays
+    values = combined.map(c => c.row);
+    backgrounds = combined.map(c => c.bg);
+    fontColors = combined.map(c => c.fc);
+
+    // Add headers back
     values.unshift(headerRow);
+    backgrounds.unshift(headerBg);
+    fontColors.unshift(headerFc);
+
+    hasChanges = true; // Always write if we sorted
+    hasFormatChanges = true;
+  } else {
+    // If no sorting, just write back changes if any
+    dataRange.setValues(values);
+    if (hasFormatChanges) {
+      dataRange.setBackgrounds(backgrounds);
+      dataRange.setFontColors(fontColors);
+    }
   }
 
-  // Write sorted and cleaned values back to sheet
-  dataRange.setValues(values);
 
   // --- Apply Conditional Formatting ---
   sheet.clearConditionalFormatRules();
   const rules = [];
   const rangeA = sheet.getRange(2, 1, sheet.getMaxRows() - 1, 1);
+  const emailRegex = "^[\\w.%+-]+@[\\w.-]+\\.[a-zA-Z]{2,}$";
+  
+  // Track all error/duplicate conditions for Column A formula
+  let colA_ErrorConditions = [];
 
-  // 1. DATA COLUMNS: Phone Error (Red BG)
-  phonePairs.forEach(pair => {
+  // 1. DATA COLUMNS: Phone Rules
+  // Loop through phones to create per-column rules
+  phonePairs.forEach((pair, index) => {
     const ranges = [
       sheet.getRange(2, pair.valueIndex + 1, sheet.getMaxRows() - 1, 1),
       sheet.getRange(2, pair.typeIndex + 1, sheet.getMaxRows() - 1, 1)
     ];
-    
     const valColLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
     const cellRef = `$${valColLetter}2`;
+
+    // A. Phone Error (Red BG)
+    const errFormula = `AND(NOT(ISBLANK(${cellRef})), NOT(REGEXMATCH(TO_TEXT(${cellRef}), "^\\(\\d{3}\\) \\d{3}-\\d{4}$")))`;
+    colA_ErrorConditions.push(errFormula);
     
-    const rule = SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=AND(NOT(ISBLANK(${cellRef})), NOT(REGEXMATCH(TO_TEXT(${cellRef}), "^\\(\\d{3}\\) \\d{3}-\\d{4}$")))`)
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=${errFormula}`)
       .setBackground(CONFIG.ERROR_COLOR_Red)
       .setRanges(ranges)
-      .build();
-    rules.push(rule);
+      .build());
+      
+    // B. Phone Duplicate (Orange Text)
+    if (index > 0) {
+      let dupCheckParts = [];
+      for (let k = 0; k < index; k++) {
+        const prevColLetter = sheet.getRange(1, phonePairs[k].valueIndex + 1).getA1Notation().replace(/\d+/g, '');
+        dupCheckParts.push(`${cellRef}=$${prevColLetter}2`);
+      }
+      
+      const dupFormula = `AND(NOT(ISBLANK(${cellRef})), OR(${dupCheckParts.join(',')}))`;
+      colA_ErrorConditions.push(dupFormula); // Duplicates trigger Col A warning too
+      
+      rules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied(`=${dupFormula}`)
+        .setFontColor(CONFIG.Dup_Color)
+        .setRanges(ranges)
+        .build());
+    }
   });
 
-  // 2. DATA COLUMNS: Email Error (Red Text)
-  const emailRegex = "^[\\w.%+-]+@[\\w.-]+\\.[a-zA-Z]{2,}$";
-  emailPairs.forEach(pair => {
+  // 2. DATA COLUMNS: Email Rules
+  emailPairs.forEach((pair, index) => {
     const ranges = [
       sheet.getRange(2, pair.valueIndex + 1, sheet.getMaxRows() - 1, 1),
       sheet.getRange(2, pair.typeIndex + 1, sheet.getMaxRows() - 1, 1)
     ];
-    
     const valColLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
     const cellRef = `$${valColLetter}2`;
 
-    const rule = SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=AND(NOT(ISBLANK(${cellRef})), NOT(REGEXMATCH(TO_TEXT(${cellRef}), "${emailRegex}")))`)
+    // A. Email Error (Red Text)
+    const errFormula = `AND(NOT(ISBLANK(${cellRef})), NOT(REGEXMATCH(TO_TEXT(${cellRef}), "${emailRegex}")))`;
+    colA_ErrorConditions.push(errFormula);
+
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=${errFormula}`)
       .setFontColor(CONFIG.ERROR_COLOR_Red)
       .setRanges(ranges)
-      .build();
-    rules.push(rule);
-  });
+      .build());
 
-  // 3. DATA COLUMNS: Warren Email Gray Text (Value & Type)
-  emailPairs.forEach(pair => {
-    const ranges = [
-      sheet.getRange(2, pair.valueIndex + 1, sheet.getMaxRows() - 1, 1),
-      sheet.getRange(2, pair.typeIndex + 1, sheet.getMaxRows() - 1, 1)
-    ];
-    
-    const valColLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-    const cellRef = `$${valColLetter}2`;
+    // B. Email Duplicate (Orange Text) - MOVED UP PRIORITY
+    if (index > 0) {
+      let dupCheckParts = [];
+      for (let k = 0; k < index; k++) {
+        const prevColLetter = sheet.getRange(1, emailPairs[k].valueIndex + 1).getA1Notation().replace(/\d+/g, '');
+        dupCheckParts.push(`${cellRef}=$${prevColLetter}2`);
+      }
+      
+      const dupFormula = `AND(NOT(ISBLANK(${cellRef})), OR(${dupCheckParts.join(',')}))`;
+      colA_ErrorConditions.push(dupFormula);
+      
+      rules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied(`=${dupFormula}`)
+        .setFontColor(CONFIG.Dup_Color)
+        .setRanges(ranges)
+        .build());
+    }
 
-    const rule = SpreadsheetApp.newConditionalFormatRule()
+    // C. Warren Email (Gray Text)
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied(`=ISNUMBER(SEARCH("${CONFIG.WARREN_DOMAIN}", ${cellRef}))`)
       .setFontColor(CONFIG.WARREN_COLOR)
       .setRanges(ranges)
-      .build();
-    rules.push(rule);
+      .build());
+
+    // D. Non-Warren Email (Purple Text)
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=AND(NOT(ISBLANK(${cellRef})), ISERROR(SEARCH("${CONFIG.WARREN_DOMAIN}", ${cellRef})))`)
+      .setFontColor(CONFIG.NonWarren_Email_Color)
+      .setRanges(ranges)
+      .build());
   });
 
-  // 4. DATA COLUMNS: Non-Warren Email Purple Text (Value & Type)
-  if (emailPairs.length > 0) {
-    emailPairs.forEach(pair => {
-      const ranges = [
-        sheet.getRange(2, pair.valueIndex + 1, sheet.getMaxRows() - 1, 1),
-        sheet.getRange(2, pair.typeIndex + 1, sheet.getMaxRows() - 1, 1)
-      ];
-      
-      const valColLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-      const cellRef = `$${valColLetter}2`;
-
-      const rule = SpreadsheetApp.newConditionalFormatRule()
-        .whenFormulaSatisfied(`=AND(NOT(ISBLANK(${cellRef})), ISERROR(SEARCH("${CONFIG.WARREN_DOMAIN}", ${cellRef})))`)
-        .setFontColor(CONFIG.NonWarren_Email_Color)
-        .setRanges(ranges)
-        .build();
-      rules.push(rule);
-    });
-  }
-
-  // --- COLUMN A RULES (Resource ID Dashboard) ---
-
-  // A. Non-Warren Email (Text #9900ff) - Check if ANY email is non-Warren
-  if (emailPairs.length > 0) {
-    const nonWarrenConditions = emailPairs.map(pair => {
-      const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-      return `AND($${colLetter}2<>"", ISERROR(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2)))`;
-    });
-    
-    if (nonWarrenConditions.length > 0) {
-      const nonWarrenFormula = `=OR(${nonWarrenConditions.join(',')})`;
-      rules.push(SpreadsheetApp.newConditionalFormatRule()
-        .whenFormulaSatisfied(nonWarrenFormula)
-        .setFontColor(CONFIG.NonWarren_Email_Color)
-        .setRanges([rangeA])
-        .build());
-    }
-  }
-
-  // B. Clean Status (Text #C0C0C0) - Valid Warren, No Phones, No Non-Warren
-  if (emailPairs.length > 0) {
-    const hasWarrenConditions = emailPairs.map(pair => {
-      const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-      return `ISNUMBER(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2))`;
-    });
-    
-    const noNonWarrenConditions = emailPairs.map(pair => {
-      const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-      return `OR($${colLetter}2="", ISNUMBER(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2)))`;
-    });
-
-    let noPhonesFormula = "TRUE";
-    if (phonePairs.length > 0) {
-      const phoneConditions = phonePairs.map(pair => {
-        const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-        return `$${colLetter}2=""`;
-      });
-      noPhonesFormula = `AND(${phoneConditions.join(',')})`;
-    }
-
-    const cleanFormula = `=AND(OR(${hasWarrenConditions.join(',')}), AND(${noNonWarrenConditions.join(',')}), ${noPhonesFormula})`;
-    
+  // --- COLUMN A RULES ---
+  
+  // A. Error Warning (BG #ffcc99) - INCLUDES DUPLICATES - Highest Priority for Col A
+  if (colA_ErrorConditions.length > 0) {
+    const errorFormula = `=OR(${colA_ErrorConditions.join(',')})`;
     rules.push(SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(cleanFormula)
-      .setFontColor(CONFIG.WARREN_COLOR) 
+      .whenFormulaSatisfied(errorFormula)
+      .setBackground(CONFIG.COLUMN_A_WARNING_COLOR)
       .setRanges([rangeA])
       .build());
   }
 
-  // C. Contractor (BG #9900ff)
+  // B. Contractor (BG Purple)
   if (labelsColumnIndex !== -1) {
     const colLetter = sheet.getRange(1, labelsColumnIndex + 1).getA1Notation().replace(/\d+/g, '');
     rules.push(SpreadsheetApp.newConditionalFormatRule()
@@ -416,29 +463,45 @@ function SetupSheetFormatting() {
       .setRanges([rangeA])
       .build());
   }
-
-  // D. Error Warning (BG #ffcc99) - Highest Priority Background
-  let errorConditions = [];
   
-  if (phonePairs.length > 0) {
-    phonePairs.forEach(pair => {
-      const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-      errorConditions.push(`AND($${colLetter}2<>"", NOT(REGEXMATCH(TO_TEXT($${colLetter}2), "^\\(\\d{3}\\) \\d{3}-\\d{4}$")))`);
-    });
-  }
-  
+  // C. Non-Warren Email (Text Purple)
   if (emailPairs.length > 0) {
-    emailPairs.forEach(pair => {
+    const nonWarrenConditions = emailPairs.map(pair => {
       const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
-      errorConditions.push(`AND($${colLetter}2<>"", NOT(REGEXMATCH(TO_TEXT($${colLetter}2), "${emailRegex}")))`);
+      return `AND($${colLetter}2<>"", ISERROR(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2)))`;
     });
+    
+    if (nonWarrenConditions.length > 0) {
+      rules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied(`=OR(${nonWarrenConditions.join(',')})`)
+        .setFontColor(CONFIG.NonWarren_Email_Color)
+        .setRanges([rangeA])
+        .build());
+    }
   }
 
-  if (errorConditions.length > 0) {
-    const errorFormula = `=OR(${errorConditions.join(',')})`;
+  // D. Clean Status (Text Gray)
+  if (emailPairs.length > 0) {
+    const hasWarrenConditions = emailPairs.map(pair => {
+      const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
+      return `ISNUMBER(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2))`;
+    });
+    const noNonWarrenConditions = emailPairs.map(pair => {
+      const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
+      return `OR($${colLetter}2="", ISNUMBER(SEARCH("${CONFIG.WARREN_DOMAIN}", $${colLetter}2)))`;
+    });
+    let noPhonesFormula = "TRUE";
+    if (phonePairs.length > 0) {
+      const phoneConditions = phonePairs.map(pair => {
+        const colLetter = sheet.getRange(1, pair.valueIndex + 1).getA1Notation().replace(/\d+/g, '');
+        return `$${colLetter}2=""`;
+      });
+      noPhonesFormula = `AND(${phoneConditions.join(',')})`;
+    }
+    const cleanFormula = `=AND(OR(${hasWarrenConditions.join(',')}), AND(${noNonWarrenConditions.join(',')}), ${noPhonesFormula})`;
     rules.push(SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(errorFormula)
-      .setBackground(CONFIG.COLUMN_A_WARNING_COLOR)
+      .whenFormulaSatisfied(cleanFormula)
+      .setFontColor(CONFIG.WARREN_COLOR) 
       .setRanges([rangeA])
       .build());
   }
@@ -466,22 +529,17 @@ function SetupSheetFormatting() {
   sheet.setConditionalFormatRules(rules);
   SpreadsheetApp.flush();
 
-  // --- TRIM SHEET TO EXACT DATA ---
+  // --- TRIM SHEET ---
   const lastDataRow = sheet.getLastRow();
   const maxRows = sheet.getMaxRows();
-  
   if (maxRows > lastDataRow) {
     sheet.deleteRows(lastDataRow + 1, maxRows - lastDataRow);
   }
 
   // --- COPY DOWN VALIDATION ---
-  // Only copy if we have data below Row 2
   if (labelsColumnIndex !== -1 && lastDataRow > 2) {
     const sourceCell = sheet.getRange(2, labelsColumnIndex + 1);
-    
-    // Fill from Row 3 to end
     const rowsToFill = lastDataRow - 2; 
-    
     const targetRange = sheet.getRange(3, labelsColumnIndex + 1, rowsToFill, 1);
     sourceCell.copyTo(targetRange, SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false);
   }
