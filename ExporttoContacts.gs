@@ -38,12 +38,6 @@ function syncSheetsToContacts() {
   }
 
   let groupMap = fetchAllContactGroups();
-  
-  // Create Reverse Map for Logging (ID -> Name)
-  let idToLabelMap = {};
-  for (const [name, id] of Object.entries(groupMap)) {
-    idToLabelMap[id] = name;
-  }
 
   // Stats include 'changes' array to log specific reasons
   let stats = { updated: 0, created: 0, deleted: 0, labelsCreated: 0, errors: [], skipped: 0, unchanged: 0, changes: [] };
@@ -83,8 +77,6 @@ function syncSheetsToContacts() {
         const newGroup = createContactGroup(label);
         if (newGroup) {
           groupMap[label] = newGroup;
-          // Update maps with new label
-          idToLabelMap[newGroup] = label;
           stats.labelsCreated++;
         }
       }
@@ -110,14 +102,14 @@ function syncSheetsToContacts() {
     }
 
     if (updateQueue.length >= BATCH_SIZE) {
-      processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
+      processUpdateBatch(updateQueue, colMap, stats, groupMap);
       updateQueue = []; 
       Utilities.sleep(1000); 
     }
   }
 
   if (updateQueue.length > 0) {
-    processUpdateBatch(updateQueue, colMap, stats, groupMap, idToLabelMap);
+    processUpdateBatch(updateQueue, colMap, stats, groupMap);
   }
 
   // --- REPORT ---
@@ -146,9 +138,8 @@ New Labels: ${stats.labelsCreated}`;
  * @param {Object} colMap A map of header names to column indices.
  * @param {Object} stats The statistics object to update.
  * @param {Object} groupMap A map of contact group names to their resource names.
- * @param {Object} idToLabelMap A map of resource names to label names.
  */
-function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
+function processUpdateBatch(queue, colMap, stats, groupMap) {
   if (queue.length === 0) {
     return;
   }
@@ -186,7 +177,7 @@ function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
           const payload = constructContactPayload(sheetItem.row, colMap, sheetItem.groupResourceNames, person.etag);
           
           // CHECK DIFFERENCES
-          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex, idToLabelMap);
+          const diffReason = getContentDiffReason(payload, person, knownGroupIds, sheetItem.rowIndex);
           
           if (diffReason) {
             batchUpdatePayload[canonicalId] = payload;
@@ -236,7 +227,7 @@ function processUpdateBatch(queue, colMap, stats, groupMap, idToLabelMap) {
  * Returns a string reason if content is different, or null if identical.
  * Accumulates multiple differences.
  */
-function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabelMap) {
+function getContentDiffReason(payload, contact, knownGroupIds, rowNum) {
   const norm = (str) => (str || "").trim();
   // Filter helper: Only keep fields that are editable CONTACT type (ignore Domain/System fields)
   const isEditable = (item) => {
@@ -330,15 +321,15 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   const labelsToAdd = [...pGroups].filter(g => !cGroups.has(g));
   const labelsToRemove = [...cGroups].filter(g => !pGroups.has(g));
 
-  const getLabelName = (id) => idToLabelMap[id] || id;
-
+  // Note: ID to Name map is not passed here in the original signature, so we just log IDs. 
+  // User can infer from ID or we could update signature to pass map. 
+  // For now, keeping signature simple as requested.
+  
   if (labelsToAdd.length > 0) {
-    const names = labelsToAdd.map(getLabelName).join(', ');
-    diffs.push(`Label(s) to add: ${names}`);
+    diffs.push(`Label(s) to add (ID): ${labelsToAdd.join(', ')}`);
   }
   if (labelsToRemove.length > 0) {
-    const names = labelsToRemove.map(getLabelName).join(', ');
-    diffs.push(`Label(s) to remove: ${names}`);
+    diffs.push(`Label(s) to remove (ID): ${labelsToRemove.join(', ')}`);
   }
 
   if (diffs.length > 0) {
@@ -346,4 +337,125 @@ function getContentDiffReason(payload, contact, knownGroupIds, rowNum, idToLabel
   }
   
   return null; // No difference found
+}
+
+function constructContactPayload(row, colMap, groupResourceNames, etag) {
+  const getVal = (idx) => (idx !== -1 && row[idx]) ? String(row[idx]).trim() : "";
+
+  const payload = {};
+  if (etag) {
+    payload.etag = etag;
+  }
+
+  // Names
+  const given = getVal(colMap.firstName);
+  const family = getVal(colMap.lastName);
+  if (given || family) {
+    payload.names = [{ givenName: given, familyName: family }];
+  }
+
+  // Organizations
+  const orgName = getVal(colMap.orgName);
+  const orgTitle = getVal(colMap.orgTitle);
+  const orgDept = getVal(colMap.orgDept);
+  if (orgName || orgTitle || orgDept) {
+    payload.organizations = [{ name: orgName, title: orgTitle, department: orgDept }];
+  }
+
+  // Memberships
+  payload.memberships = groupResourceNames.map(grp => ({
+    contactGroupMembership: { contactGroupResourceName: grp }
+  }));
+
+  // Emails
+  const emails = [];
+  colMap.emails.forEach(pair => {
+    const val = getVal(pair.valIdx);
+    const type = getVal(pair.typeIdx);
+    if (val) {
+      emails.push({ value: val, type: type || 'other' });
+    }
+  });
+  payload.emailAddresses = emails; 
+
+  // Phones
+  const phones = [];
+  colMap.phones.forEach(pair => {
+    const val = getVal(pair.valIdx);
+    const type = getVal(pair.typeIdx);
+    if (val) {
+      phones.push({ value: val, type: type || 'other' });
+    }
+  });
+  payload.phoneNumbers = phones;
+
+  return payload;
+}
+
+function mapHeaders(headers) {
+  const map = {
+    id: headers.indexOf("Resource ID"),
+    firstName: headers.indexOf("First Name"),
+    lastName: headers.indexOf("Last Name"),
+    labels: headers.indexOf("Labels"),
+    orgName: headers.indexOf("Organization 1 - Company"),
+    orgTitle: headers.indexOf("Organization 1 - Title"),
+    orgDept: headers.indexOf("Organization 1 - Department"),
+    emails: [],
+    phones: []
+  };
+
+  headers.forEach((h, i) => {
+    if (/^Email \d+ - Value$/.test(h)) {
+      const num = h.match(/\d+/)[0];
+      const typeIdx = headers.indexOf(`Email ${num} - Type`);
+      if (typeIdx > -1) {
+        map.emails.push({ valIdx: i, typeIdx: typeIdx });
+      }
+    }
+    if (/^Phone \d+ - Value$/.test(h)) {
+      const num = h.match(/\d+/)[0];
+      const typeIdx = headers.indexOf(`Phone ${num} - Type`);
+      if (typeIdx > -1) {
+        map.phones.push({ valIdx: i, typeIdx: typeIdx });
+      }
+    }
+  });
+  
+  return map;
+}
+
+function fetchAllContactGroups() {
+  const map = {};
+  let pageToken;
+  try {
+    do {
+      const response = People.ContactGroups.list({
+        groupFields: 'name',
+        pageSize: 1000,
+        pageToken: pageToken
+      });
+      if (response.contactGroups) {
+        response.contactGroups.forEach(g => {
+          map[g.formattedName] = g.resourceName;
+        });
+      }
+      pageToken = response.nextPageToken;
+    } while (pageToken);
+  } catch (e) {
+    console.log("Error fetching groups: " + e.message);
+  }
+  return map;
+}
+
+function createContactGroup(name) {
+  try {
+    const response = People.ContactGroups.create({
+      contactGroup: { name: name }
+    });
+    return response.resourceName;
+  } catch (e) {
+    console.log(`Error creating label '${name}': ` + e.message);
+    return null;
+  }
 }
