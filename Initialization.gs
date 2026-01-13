@@ -1,8 +1,8 @@
 /*
 Project Name: Contact Import
-Project Version: 9.01
+Project Version: 9.09
 Filename: Initialization.gs
-File Version: 4.01
+File Version: 4.02
 Chat link: [Insert Link]
 */
 
@@ -23,12 +23,13 @@ const CONFIG = {
   WARREN_COLOR: '#C0C0C0',
   NonWarren_Email_Color: '#9900ff',
   Contractor_Color: '#9900ff',
+  Dup_Color: '#FFA500', // Orange for duplicates
   DELETE_ROW_COLOR: '#f4c7c3', // Light Red for "Delete from contacts"
   ARCHIVE_ROW_COLOR: '#d0e0e3', // Light Cyan for "Archive"
   WARREN_DOMAIN: '@warren.k12.in.us',
   // Sorting Configuration (Comma Separated Values)
-  Labels_Values_Sort_Order: "Work Phone List, Contractors, Personal, Archive, Delete from contacts",
-  Row_Labels_Sort_Order_Top: "Work Phone List, Contractors, Personal",
+  Labels_Values_Sort_Order: "Work Phone List, Contractors, Personal, Porter, Archive, Delete from contacts",
+  Row_Labels_Sort_Order_Top: "Work Phone List, Contractors, Personal, Porter",
   Row_Labels_Sort_Order_Bottom: "Archive, Delete from contacts"
 };
 
